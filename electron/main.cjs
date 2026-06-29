@@ -59,8 +59,10 @@ const BUILTIN_OPENDESIGN_COMMAND = 'builtin:opendesign';
 const LEGACY_OPENDESIGN_COMMAND = 'open-design --prompt "{brief}" --out "{projectPath}"';
 const LEGACY_CODER_SYSTEM_PROMPT =
   'You are a senior frontend engineer. Return only JSON with a files array. Build a complete static web app using index.html, styles.css, and app.js unless the user asks for a framework.';
+const LEGACY_DESKTOP_CODER_SYSTEM_PROMPT =
+  'You are a senior desktop app engineer. Return only complete fenced file blocks. Build a complete local Electron desktop app with package.json, electron/main.cjs, electron/preload.cjs, renderer/index.html, renderer/styles.css, and renderer/app.js. The UI must look polished and production-ready, not like default HTML.';
 const BUILTIN_CODER_SYSTEM_PROMPT =
-  'You are a senior software engineer. Choose the most appropriate language, framework, and runtime for the user request. Return only complete fenced file blocks. Always include opendesign-app.json describing the stack and launch instructions. Build polished, production-ready software, not a default scaffold.';
+  'You are a senior software engineer. Choose the most appropriate language, framework, and runtime for the user request. Return only complete fenced file blocks. Always include opendesign-app.json describing the stack and launch instructions. Every local href/src in HTML must have a matching file block at that exact relative path. Build polished, production-ready software, not a default scaffold.';
 
 let mainWindow;
 const generatedWindows = new Set();
@@ -125,7 +127,11 @@ async function readState() {
     config.openDesignCommand = BUILTIN_OPENDESIGN_COMMAND;
     await fs.writeFile(userDataPath('config.json'), JSON.stringify(config, null, 2));
   }
-  if (!config.coderSystemPrompt?.trim() || config.coderSystemPrompt === LEGACY_CODER_SYSTEM_PROMPT) {
+  if (
+    !config.coderSystemPrompt?.trim() ||
+    config.coderSystemPrompt === LEGACY_CODER_SYSTEM_PROMPT ||
+    config.coderSystemPrompt === LEGACY_DESKTOP_CODER_SYSTEM_PROMPT
+  ) {
     config.coderSystemPrompt = BUILTIN_CODER_SYSTEM_PROMPT;
     await fs.writeFile(userDataPath('config.json'), JSON.stringify(config, null, 2));
   }

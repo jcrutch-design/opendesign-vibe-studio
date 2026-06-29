@@ -388,6 +388,7 @@ export function App() {
                 'If the user asks for a Windows/local desktop app, prefer Electron unless another native stack is clearly better.',
                 'If you choose Electron, include package.json, electron/main.cjs, electron/preload.cjs, renderer/index.html, renderer/styles.css, and renderer/app.js.',
                 'If you choose command launch, keep dependencies minimal and include a clear start command in opendesign-app.json.',
+                'Every local href or src used by HTML must have a matching file block at that exact relative path. If HTML says href="styles.css", return ```file:styles.css. If HTML says src="script.js", return ```file:script.js.',
                 'The generated app must feel production-ready for its chosen platform, with real interactions, realistic states, and no default unstyled scaffold UI.',
                 'Return only complete file blocks and no extra prose.',
                 'Use this file-block format:',
@@ -426,9 +427,23 @@ export function App() {
           const repaired = await repairGeneratedFileManifest(activeProvider, response, outputIssues.join('\n'));
           generated = extractGeneratedFiles(repaired);
           const remainingIssues = getGeneratedOutputIssues(generated);
-          if (remainingIssues.length) {
+          const hardIssues = remainingIssues.filter(isHardOutputIssue);
+          if (hardIssues.length) {
+            generated = completeLaunchableOutput(generated, brief, designOutput);
+            const finalHardIssues = getGeneratedOutputIssues(generated).filter(isHardOutputIssue);
+            if (finalHardIssues.length) {
+              throw new Error(
+                `The model did not produce a complete launchable app. Missing output: ${finalHardIssues.join('; ')}`,
+              );
+            }
+          }
+          const polishIssues = getGeneratedOutputIssues(generated).filter((issue) => !isHardOutputIssue(issue));
+          if (polishIssues.length) {
+            setStatus(`Built with automatic polish safeguards: ${polishIssues.join('; ')}`);
+          }
+          if (!generated.length) {
             throw new Error(
-              `The model did not produce a complete launchable app. Missing or weak output: ${remainingIssues.join('; ')}`,
+              'The model did not produce any app files.',
             );
           }
         }
@@ -438,9 +453,9 @@ export function App() {
       const written = await window.studio.writeProjectFiles(project.path, generated);
       const prepared = await window.studio.prepareGeneratedApp(project.path, written, project.name);
       setFiles(prepared);
+      const runtimeEntry = getRuntimePreviewFile(prepared);
       setSelectedFile(
-        prepared.find((file) => file.path === 'renderer/index.html')?.path ??
-          prepared.find((file) => file.path.endsWith('index.html'))?.path ??
+        runtimeEntry?.path ??
           prepared[0]?.path ??
           '',
       );
@@ -498,7 +513,7 @@ export function App() {
         {
           role: 'system',
           content:
-            'You repair or upgrade code-generation output. Choose or preserve the most appropriate language/framework for the user request. Convert the provided response into complete fenced file blocks for a launchable, polished app. Always include opendesign-app.json with stack and launch instructions.',
+            'You repair or upgrade code-generation output. Choose or preserve the most appropriate language/framework for the user request. Convert the provided response into complete fenced file blocks for a launchable, polished app. Always include opendesign-app.json with stack and launch instructions. Every local href/src in HTML must have a matching file block at that exact relative path. Replace default scaffold UI with styled, production-feeling screens.',
         },
         {
           role: 'user',
@@ -506,6 +521,8 @@ export function App() {
             `Parse error:\n${parseError}`,
             'The previous answer was intended to contain generated app files, but its JSON was invalid.',
             'Rewrite it as file fences only, with no prose before or after. Preserve or choose the most appropriate stack for the user request.',
+            'If the HTML references styles.css, script.js, app.js, images, or any other local asset, include that exact file block. Do not leave dangling links.',
+            'If the UI is a plain table/form scaffold, upgrade the HTML/CSS into a polished application surface with navigation, empty states, responsive layout, and real visual hierarchy.',
             'Use this exact format:',
             '```file:opendesign-app.json',
             '{"schemaVersion":1,"stack":"electron|python|node|static-web|custom","language":"javascript|python|...","entry":"relative/path","launch":{"kind":"electron-window|browser|command|none","entry":"relative/path","command":"optional command"}}',
@@ -1858,6 +1875,300 @@ function getGeneratedOutputIssues(files: GeneratedFile[]) {
   }
 
   return issues;
+}
+
+function isHardOutputIssue(issue: string) {
+  return (
+    issue.includes('opendesign-app.json') ||
+    issue.includes('requires') ||
+    issue.includes('required') ||
+    issue.includes('must include') ||
+    issue.includes('must create') ||
+    issue.includes('must load') ||
+    issue.includes('references missing local asset')
+  );
+}
+
+function completeLaunchableOutput(files: GeneratedFile[], brief: string, designOutput: string) {
+  const completed = mergeGeneratedFiles([], files);
+  const htmlFile = getRuntimePreviewFile(completed);
+  if (!htmlFile) {
+    return completed;
+  }
+  const existingPaths = new Set(completed.map((file) => file.path.toLowerCase()));
+  const refs = extractLocalHtmlAssetRefs(htmlFile.content);
+  const additions: GeneratedFile[] = [];
+
+  for (const ref of refs) {
+    const resolved = resolveAssetPath(htmlFile.path, ref);
+    if (!resolved || existingPaths.has(resolved.toLowerCase()) || hasFallbackAsset(existingPaths, ref)) {
+      continue;
+    }
+    if (/\.css$/i.test(resolved)) {
+      additions.push({
+        path: resolved,
+        content: buildAutoCompletedCss(brief, designOutput),
+      });
+      existingPaths.add(resolved.toLowerCase());
+    }
+    if (/\.(?:js|mjs|cjs)$/i.test(resolved)) {
+      additions.push({
+        path: resolved,
+        content: buildAutoCompletedScript(),
+      });
+      existingPaths.add(resolved.toLowerCase());
+    }
+  }
+
+  return mergeGeneratedFiles(completed, additions);
+}
+
+function buildAutoCompletedCss(brief: string, designOutput: string) {
+  const themeHint = `${brief} ${designOutput}`.toLowerCase();
+  const accent = themeHint.includes('router') || themeHint.includes('model') ? '#0b6f78' : '#165d66';
+  return `:root {
+  color-scheme: light;
+  --bg: #eef4f0;
+  --panel: rgba(255, 255, 255, 0.92);
+  --ink: #14201f;
+  --muted: #60756f;
+  --line: #c8d7d0;
+  --accent: ${accent};
+  --accent-2: #f05a4f;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background:
+    linear-gradient(90deg, rgba(22, 93, 102, 0.08) 1px, transparent 1px),
+    linear-gradient(rgba(22, 93, 102, 0.08) 1px, transparent 1px),
+    var(--bg);
+  background-size: 28px 28px;
+  color: var(--ink);
+}
+
+.app {
+  width: min(1180px, calc(100vw - 36px));
+  min-height: calc(100vh - 36px);
+  margin: 18px auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 24px 70px rgba(20, 32, 31, 0.16);
+  overflow: hidden;
+}
+
+.title-bar,
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 68px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 18px;
+  background: #15272b;
+  color: #f4f7f2;
+}
+
+.title,
+h1 {
+  margin: 0;
+  font-size: clamp(1.1rem, 2vw, 1.45rem);
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.main {
+  display: grid;
+  grid-template-columns: minmax(178px, 0.28fr) minmax(0, 1fr);
+  min-height: calc(100vh - 106px);
+}
+
+.nav,
+nav {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  border-right: 1px solid var(--line);
+  padding: 16px;
+  background: #f8fbf7;
+}
+
+button,
+.btn {
+  min-height: 38px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 0 12px;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+.nav button,
+.nav-btn,
+nav button {
+  width: 100%;
+  justify-content: flex-start;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+}
+
+.nav button.active,
+.nav-btn.active,
+nav button.active {
+  background: #e8f3ef;
+  color: var(--accent);
+}
+
+.workspace,
+main,
+section.workspace {
+  min-width: 0;
+  padding: clamp(18px, 3vw, 34px);
+}
+
+.content {
+  display: grid;
+  gap: 16px;
+  max-width: 980px;
+}
+
+.hidden,
+[hidden],
+[style*="display:none"] {
+  display: none !important;
+}
+
+h2,
+h3 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+h2 {
+  font-size: clamp(1.35rem, 2.4vw, 2.1rem);
+}
+
+h3 {
+  margin-top: 12px;
+  color: var(--accent);
+}
+
+.form-group {
+  display: grid;
+  gap: 7px;
+}
+
+label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 11px;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+}
+
+th,
+td {
+  border-bottom: 1px solid #e4ece8;
+  padding: 11px;
+  text-align: left;
+}
+
+th {
+  color: var(--muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+pre,
+.sample-box {
+  overflow: auto;
+  border-radius: 8px;
+  background: #15272b;
+  color: #e6f1ec;
+  padding: 14px;
+}
+
+@media (max-width: 760px) {
+  .main {
+    grid-template-columns: 1fr;
+  }
+
+  .nav,
+  nav {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+`;
+}
+
+function buildAutoCompletedScript() {
+  return `const sectionButtons = document.querySelectorAll('[data-section]');
+const sections = Array.from(document.querySelectorAll('[id^="section-"]'));
+
+sectionButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const target = button.getAttribute('data-section');
+    sectionButtons.forEach((item) => item.classList.toggle('active', item === button));
+    sections.forEach((section) => {
+      const active = section.id === 'section-' + target;
+      section.classList.toggle('hidden', !active);
+      section.style.display = active ? '' : 'none';
+    });
+  });
+});
+
+document.querySelectorAll('button').forEach((button) => {
+  button.addEventListener('click', () => {
+    if (!button.dataset.originalText) {
+      button.dataset.originalText = button.textContent || '';
+    }
+    if (/save|start|fetch|refresh/i.test(button.dataset.originalText)) {
+      button.textContent = 'Done';
+      window.setTimeout(() => {
+        button.textContent = button.dataset.originalText || 'Ready';
+      }, 900);
+    }
+  });
+});
+`;
 }
 
 function readGeneratedManifest(files: GeneratedFile[]) {

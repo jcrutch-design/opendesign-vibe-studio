@@ -13,6 +13,8 @@ import {
   FolderOpen,
   HelpCircle,
   Loader2,
+  MessageSquare,
+  Minimize2,
   Palette,
   Play,
   Plus,
@@ -23,6 +25,8 @@ import {
   Settings,
   Sparkles,
   TerminalSquare,
+  Wand2,
+  X,
 } from 'lucide-react';
 import type { AppConfig, GeneratedFile, Provider, StudioProject, StudioState } from './types';
 import { createFallbackApp, extractGeneratedFiles } from './vibe';
@@ -86,6 +90,13 @@ type ReadyCheck = {
 };
 
 type StatusTone = 'ready' | 'working' | 'waiting' | 'success' | 'danger';
+type AssistantMode = 'auto' | 'design' | 'runtime';
+
+type AssistantMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+};
 
 export function App() {
   const [state, setState] = useState<StudioState>(defaultState);
@@ -109,6 +120,17 @@ export function App() {
   const [vibeProgress, setVibeProgress] = useState<VibeProgress>();
   const [buildResult, setBuildResult] = useState<BuildResult>();
   const [clarification, setClarification] = useState<ClarificationRequest>();
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantMode, setAssistantMode] = useState<AssistantMode>('auto');
+  const [assistantPrompt, setAssistantPrompt] = useState('');
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([
+    {
+      id: 'assistant-ready',
+      role: 'assistant',
+      content: 'Tell me what to change. I can rewrite design notes or patch the live preview files.',
+    },
+  ]);
+  const [previewRevision, setPreviewRevision] = useState(0);
 
   useEffect(() => {
     void refreshState();
@@ -174,16 +196,16 @@ export function App() {
     const index =
       files.find((file) => file.path === 'renderer/index.html') ??
       files.find((file) => file.path.endsWith('index.html'));
-    return index ? `file:///${activeProject.path.replace(/\\/g, '/')}/${index.path}` : '';
-  }, [activeProject, files]);
+    return index ? `file:///${activeProject.path.replace(/\\/g, '/')}/${index.path}?v=${previewRevision}` : '';
+  }, [activeProject, files, previewRevision]);
 
   const proposalPreviewFile = useMemo(() => {
     if (!activeProject) {
       return '';
     }
     const proposal = files.find((file) => file.path.endsWith('opendesign-proposal.html'));
-    return proposal ? `file:///${activeProject.path.replace(/\\/g, '/')}/${proposal.path}` : '';
-  }, [activeProject, files]);
+    return proposal ? `file:///${activeProject.path.replace(/\\/g, '/')}/${proposal.path}?v=${previewRevision}` : '';
+  }, [activeProject, files, previewRevision]);
 
   function startProjectRailResize(event: ReactMouseEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -556,6 +578,177 @@ export function App() {
     setStatus('Copied the next-run prompt');
   }
 
+  async function runMiniAssistant() {
+    const prompt = assistantPrompt.trim();
+    if (!prompt) {
+      return;
+    }
+    if (!activeProvider?.endpoint) {
+      setStatus('Select a model route before using the mini assistant.');
+      return;
+    }
+
+    const mode = resolveAssistantMode(assistantMode, prompt, files);
+    const userMessage: AssistantMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: prompt,
+    };
+    setAssistantMessages((current) => [...current, userMessage]);
+    setAssistantPrompt('');
+    setBusy('assistant');
+    setStatus(mode === 'design' ? 'Mini assistant is reshaping the design notes...' : 'Mini assistant is patching the preview...');
+
+    try {
+      if (mode === 'design') {
+        const currentFiles = activeProject ? (files.length ? files : await window.studio.readProjectFiles(activeProject.path)) : [];
+        const hasProposalPreview = currentFiles.some((file) => file.path.endsWith('opendesign-proposal.html'));
+        const response = await window.studio.chat({
+          provider: activeProvider,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are an embedded product design assistant. Rewrite the OpenDesign handoff notes so the coding agent can act on the user request. Be specific about layout, interaction, states, visual hierarchy, and runtime behavior. Return a fenced ```design-notes block with the revised notes. If a proposal preview exists, you may also return a complete ```file:opendesign-proposal.html block to update the visual proposal preview. Do not include prose outside fences.',
+            },
+            {
+              role: 'user',
+              content: [
+                `Current brief:\n${brief || 'No brief yet.'}`,
+                `Current handoff notes:\n${designOutput || 'No handoff notes yet.'}`,
+                `Current proposal preview exists: ${hasProposalPreview ? 'yes' : 'no'}`,
+                hasProposalPreview ? `Current proposal file:\n${summarizeFilesForAssistant(currentFiles.filter((file) => file.path.endsWith('opendesign-proposal.html')), 'opendesign-proposal.html')}` : '',
+                `Requested change:\n${prompt}`,
+              ].join('\n\n'),
+            },
+          ],
+        });
+        const nextOutput = extractDesignNotes(response) || response.trim();
+        const changedFiles = extractOptionalGeneratedFiles(response);
+        if (activeProject && changedFiles.length) {
+          await window.studio.writeProjectFiles(activeProject.path, changedFiles);
+          setFiles(await window.studio.readProjectFiles(activeProject.path));
+          setPreviewRevision((current) => current + 1);
+        }
+        setDesignOutput(nextOutput);
+        setStatus(
+          changedFiles.length
+            ? 'Mini assistant updated the design handoff and proposal preview.'
+            : 'Mini assistant updated the design handoff.',
+        );
+        setAssistantMessages((current) => [
+          ...current,
+          {
+            id: `assistant-${Date.now()}`,
+            role: 'assistant',
+            content: changedFiles.length
+              ? 'Updated the design handoff notes and refreshed the proposal preview.'
+              : 'Updated the design handoff notes. Build or patch the runtime when you are ready.',
+          },
+        ]);
+        return;
+      }
+
+      const project = await ensureProject();
+      if (!project) {
+        setStatus('Create or import a project first.');
+        return;
+      }
+      const currentFiles = files.length ? files : await window.studio.readProjectFiles(project.path);
+      const response = await window.studio.chat({
+        provider: activeProvider,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are an embedded runtime-edit assistant inside OpenDesign Vibe Studio. Make direct on-the-fly changes to the generated app. Return only complete fenced file blocks for files you changed or created. Do not include prose. Preserve the existing stack unless the user explicitly asks to change it. Include opendesign-app.json only when launch metadata changes.',
+          },
+          {
+            role: 'user',
+            content: [
+              `Brief:\n${brief || 'No brief yet.'}`,
+              `OpenDesign handoff:\n${designOutput || 'No handoff notes yet.'}`,
+              `Active project:\n${project.path}`,
+              `Selected file:\n${selectedFile || 'None'}`,
+              `Requested on-the-fly change:\n${prompt}`,
+              `Current files:\n${summarizeFilesForAssistant(currentFiles, selectedFile)}`,
+              'Return file fences like:',
+              '```file:renderer/styles.css',
+              'complete replacement file content',
+              '```',
+            ].join('\n\n'),
+          },
+        ],
+      });
+
+      let changedFiles: GeneratedFile[];
+      try {
+        changedFiles = extractGeneratedFiles(response);
+      } catch (error) {
+        const repaired = await repairAssistantFileBlocks(activeProvider, response, readError(error));
+        changedFiles = extractGeneratedFiles(repaired);
+      }
+      if (!changedFiles.length) {
+        throw new Error('Mini assistant did not return any file blocks to apply.');
+      }
+
+      const merged = mergeGeneratedFiles(currentFiles, changedFiles);
+      await window.studio.writeProjectFiles(project.path, changedFiles);
+      const prepared = await window.studio.prepareGeneratedApp(project.path, merged, project.name);
+      setFiles(prepared);
+      setSelectedFile(changedFiles[0]?.path ?? prepared[0]?.path ?? '');
+      setBuildResult(makeBuildResult(project, prepared, true, activeProvider.name));
+      setPreviewRevision((current) => current + 1);
+      setView('code');
+      setStatus(`Mini assistant applied ${changedFiles.length} file ${changedFiles.length === 1 ? 'change' : 'changes'}.`);
+      setAssistantMessages((current) => [
+        ...current,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          content: `Applied ${changedFiles.length} file ${changedFiles.length === 1 ? 'change' : 'changes'} and refreshed the preview.`,
+        },
+      ]);
+    } catch (error) {
+      const message = readError(error);
+      setStatus(message);
+      setAssistantMessages((current) => [
+        ...current,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          content: message,
+        },
+      ]);
+    } finally {
+      setBusy(undefined);
+    }
+  }
+
+  async function repairAssistantFileBlocks(provider: Provider, brokenResponse: string, parseError: string) {
+    return window.studio.chat({
+      provider,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You repair malformed runtime edit output. Convert the previous answer into complete fenced file blocks only. Return only files that should be changed or created.',
+        },
+        {
+          role: 'user',
+          content: [
+            `Parser error:\n${parseError}`,
+            'Rewrite the previous answer using only this format:',
+            '```file:relative/path.ext',
+            'complete replacement file content',
+            '```',
+            `Previous answer:\n${brokenResponse}`,
+          ].join('\n\n'),
+        },
+      ],
+    });
+  }
+
   async function saveConfig() {
     await persistConfig(configDraft, 'Settings saved');
   }
@@ -786,7 +979,111 @@ export function App() {
           />
         )}
       </main>
+
+      <MiniAssistant
+        open={assistantOpen}
+        mode={assistantMode}
+        prompt={assistantPrompt}
+        messages={assistantMessages}
+        busy={busy === 'assistant'}
+        providerName={activeProvider?.name}
+        modelName={activeProvider?.model}
+        onOpen={() => setAssistantOpen(true)}
+        onClose={() => setAssistantOpen(false)}
+        onMode={setAssistantMode}
+        onPrompt={setAssistantPrompt}
+        onSend={() => void runMiniAssistant()}
+      />
     </div>
+  );
+}
+
+function MiniAssistant(props: {
+  open: boolean;
+  mode: AssistantMode;
+  prompt: string;
+  messages: AssistantMessage[];
+  busy: boolean;
+  providerName?: string;
+  modelName?: string;
+  onOpen: () => void;
+  onClose: () => void;
+  onMode: (mode: AssistantMode) => void;
+  onPrompt: (value: string) => void;
+  onSend: () => void;
+}) {
+  if (!props.open) {
+    return (
+      <button className="assistant-fab" onClick={props.onOpen} title="Open mini assistant">
+        <MessageSquare size={19} />
+        <span>Assistant</span>
+      </button>
+    );
+  }
+
+  return (
+    <aside className="assistant-panel" aria-label="Mini assistant">
+      <header className="assistant-header">
+        <div>
+          <p className="eyebrow">Live assistant</p>
+          <h2>Change the app</h2>
+        </div>
+        <button className="ghost-icon" onClick={props.onClose} title="Close assistant">
+          <Minimize2 size={15} />
+        </button>
+      </header>
+
+      <div className="assistant-route">
+        <Wand2 size={15} />
+        <span>{props.providerName ? `${props.providerName} / ${props.modelName}` : 'No model route'}</span>
+      </div>
+
+      <div className="assistant-mode" role="group" aria-label="Assistant mode">
+        {(['auto', 'design', 'runtime'] as AssistantMode[]).map((mode) => (
+          <button
+            key={mode}
+            className={props.mode === mode ? 'active' : ''}
+            onClick={() => props.onMode(mode)}
+            type="button"
+          >
+            {mode}
+          </button>
+        ))}
+      </div>
+
+      <div className="assistant-log">
+        {props.messages.map((message) => (
+          <div key={message.id} className={`assistant-message ${message.role}`}>
+            {message.content}
+          </div>
+        ))}
+      </div>
+
+      <form
+        className="assistant-compose"
+        onSubmit={(event) => {
+          event.preventDefault();
+          props.onSend();
+        }}
+      >
+        <textarea
+          value={props.prompt}
+          onChange={(event) => props.onPrompt(event.target.value)}
+          placeholder="Try: make the preview denser, add a dark mode toggle, tighten the sidebar, or update the handoff notes."
+          disabled={props.busy}
+        />
+        <div className="assistant-actions">
+          <button className="secondary" type="button" onClick={() => props.onPrompt('')} disabled={props.busy}>
+            <X size={15} />
+            Clear
+          </button>
+          <button className="primary coral" type="submit" disabled={props.busy || !props.prompt.trim()}>
+            {props.busy ? <Loader2 className="spin" size={15} /> : <Send size={15} />}
+            Apply
+          </button>
+        </div>
+      </form>
+    </aside>
   );
 }
 
@@ -1302,6 +1599,55 @@ function SettingsView(props: {
       </section>
     </div>
   );
+}
+
+function resolveAssistantMode(mode: AssistantMode, prompt: string, files: GeneratedFile[]): Exclude<AssistantMode, 'auto'> {
+  if (mode !== 'auto') {
+    return mode;
+  }
+  const value = prompt.toLowerCase();
+  if (/\b(brief|handoff|proposal|design notes|design spec|visual direction|user flow)\b/.test(value)) {
+    return 'design';
+  }
+  if (!files.length && /\b(notes|design|plan|spec|concept)\b/.test(value)) {
+    return 'design';
+  }
+  return 'runtime';
+}
+
+function mergeGeneratedFiles(existing: GeneratedFile[], changes: GeneratedFile[]) {
+  const byPath = new Map(existing.map((file) => [file.path, file]));
+  for (const file of changes) {
+    byPath.set(file.path, file);
+  }
+  return Array.from(byPath.values());
+}
+
+function extractOptionalGeneratedFiles(raw: string) {
+  try {
+    return extractGeneratedFiles(raw);
+  } catch {
+    return [];
+  }
+}
+
+function extractDesignNotes(raw: string) {
+  const match = raw.match(/```design-notes\s*([\s\S]*?)```/i);
+  return match?.[1]?.trim() ?? '';
+}
+
+function summarizeFilesForAssistant(files: GeneratedFile[], selectedFile: string) {
+  const ordered = [
+    ...files.filter((file) => file.path === selectedFile),
+    ...files.filter((file) => file.path !== selectedFile),
+  ];
+  return ordered
+    .slice(0, 18)
+    .map((file) => {
+      const content = file.content.length > 9000 ? `${file.content.slice(0, 9000)}\n/* ...truncated... */` : file.content;
+      return `--- ${file.path} ---\n${content}`;
+    })
+    .join('\n\n');
 }
 
 function getWorkflowStages(input: {

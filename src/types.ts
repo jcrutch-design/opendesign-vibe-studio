@@ -51,6 +51,10 @@ export type ElectronApi = {
   openPath: (targetPath: string) => Promise<void>;
   readProjectFiles: (projectPath: string) => Promise<GeneratedFile[]>;
   writeProjectFiles: (projectPath: string, files: GeneratedFile[]) => Promise<GeneratedFile[]>;
+  prepareDesktopApp: (projectPath: string, files: GeneratedFile[], appName: string) => Promise<GeneratedFile[]>;
+  launchDesktopApp: (projectPath: string) => Promise<{ ok: boolean; entryPath?: string; command?: string; kind: string }>;
+  prepareGeneratedApp: (projectPath: string, files: GeneratedFile[], appName: string) => Promise<GeneratedFile[]>;
+  launchGeneratedApp: (projectPath: string) => Promise<{ ok: boolean; entryPath?: string; command?: string; kind: string }>;
   runOpenDesign: (payload: OpenDesignRun) => Promise<{ ok: boolean; output: string }>;
   chat: (payload: { provider: Provider; messages: LlmMessage[] }) => Promise<string>;
   onOpenDesignLog: (callback: (line: string) => void) => () => void;

@@ -1,13 +1,15 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { exec } = require('node:child_process');
+const { exec, spawn } = require('node:child_process');
 
 const ignoredDirs = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.vite', 'release']);
 const textExts = new Set([
   '.html',
   '.css',
   '.js',
+  '.cjs',
+  '.mjs',
   '.jsx',
   '.ts',
   '.tsx',
@@ -19,12 +21,49 @@ const textExts = new Set([
   '.yaml',
   '.toml',
   '.xml',
+  '.py',
+  '.cs',
+  '.csproj',
+  '.sln',
+  '.vb',
+  '.vbproj',
+  '.fs',
+  '.fsproj',
+  '.java',
+  '.kt',
+  '.kts',
+  '.gradle',
+  '.go',
+  '.rs',
+  '.swift',
+  '.php',
+  '.rb',
+  '.r',
+  '.lua',
+  '.dart',
+  '.ex',
+  '.exs',
+  '.erl',
+  '.hrl',
+  '.clj',
+  '.cljs',
+  '.scala',
+  '.sql',
+  '.ps1',
+  '.sh',
+  '.bat',
+  '.cmd',
 ]);
 
 const BUILTIN_OPENDESIGN_COMMAND = 'builtin:opendesign';
 const LEGACY_OPENDESIGN_COMMAND = 'open-design --prompt "{brief}" --out "{projectPath}"';
+const LEGACY_CODER_SYSTEM_PROMPT =
+  'You are a senior frontend engineer. Return only JSON with a files array. Build a complete static web app using index.html, styles.css, and app.js unless the user asks for a framework.';
+const BUILTIN_CODER_SYSTEM_PROMPT =
+  'You are a senior software engineer. Choose the most appropriate language, framework, and runtime for the user request. Return only complete fenced file blocks. Always include opendesign-app.json describing the stack and launch instructions. Build polished, production-ready software, not a default scaffold.';
 
 let mainWindow;
+const generatedWindows = new Set();
 
 function defaultConfig() {
   return {
@@ -46,8 +85,7 @@ function defaultConfig() {
       },
     ],
     openDesignCommand: BUILTIN_OPENDESIGN_COMMAND,
-    coderSystemPrompt:
-      'You are a senior frontend engineer. Return only JSON with a files array. Build a complete static web app using index.html, styles.css, and app.js unless the user asks for a framework.',
+    coderSystemPrompt: BUILTIN_CODER_SYSTEM_PROMPT,
   };
 }
 
@@ -85,6 +123,10 @@ async function readState() {
   };
   if (shouldMigrateOpenDesignCommand(config.openDesignCommand)) {
     config.openDesignCommand = BUILTIN_OPENDESIGN_COMMAND;
+    await fs.writeFile(userDataPath('config.json'), JSON.stringify(config, null, 2));
+  }
+  if (!config.coderSystemPrompt?.trim() || config.coderSystemPrompt === LEGACY_CODER_SYSTEM_PROMPT) {
+    config.coderSystemPrompt = BUILTIN_CODER_SYSTEM_PROMPT;
     await fs.writeFile(userDataPath('config.json'), JSON.stringify(config, null, 2));
   }
   const projects = await readJson(userDataPath('projects.json'), []);
@@ -194,6 +236,95 @@ ipcMain.handle('studio:import-project', async () => {
 ipcMain.handle('studio:open-path', async (_event, targetPath) => {
   await shell.openPath(targetPath);
 });
+
+ipcMain.handle('studio:prepare-desktop-app', async (_event, projectPath, files, appName) => {
+  await prepareGeneratedApp(projectPath, files, appName, { preferDesktop: true });
+  const root = path.resolve(projectPath);
+  const prepared = [];
+  await walkTextFiles(root, root, prepared);
+  return prepared;
+});
+
+ipcMain.handle('studio:launch-desktop-app', async (_event, projectPath) => {
+  return launchGeneratedApp(projectPath);
+});
+
+ipcMain.handle('studio:prepare-generated-app', async (_event, projectPath, files, appName) => {
+  await prepareGeneratedApp(projectPath, files, appName);
+  const root = path.resolve(projectPath);
+  const prepared = [];
+  await walkTextFiles(root, root, prepared);
+  return prepared;
+});
+
+ipcMain.handle('studio:launch-generated-app', async (_event, projectPath) => {
+  return launchGeneratedApp(projectPath);
+});
+
+async function launchGeneratedApp(projectPath) {
+  const root = path.resolve(projectPath);
+  const manifest = await readOrInferAppManifest(root, []);
+  const launch = manifest.launch || {};
+  const kind = launch.kind || inferLaunchKind(manifest);
+  const entry = launch.entry || manifest.entry || '';
+
+  if (kind === 'none') {
+    return { ok: false, kind, entryPath: root };
+  }
+
+  if (kind === 'command') {
+    if (!launch.command) {
+      throw new Error('Launch manifest uses command mode but no command was provided.');
+    }
+    const child = spawn(launch.command, {
+      cwd: root,
+      shell: true,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+    });
+    child.unref();
+    return { ok: true, kind, command: launch.command, entryPath: root };
+  }
+
+  const entryPath = resolveInside(root, entry || (await findOrInferHtmlEntry(root, [])));
+
+  if (kind === 'browser') {
+    await shell.openPath(entryPath);
+    return { ok: true, kind, entryPath };
+  }
+
+  const preloadPath = path.join(path.resolve(projectPath), 'electron', 'preload.cjs');
+  let preload;
+  try {
+    await fs.access(preloadPath);
+    preload = preloadPath;
+  } catch {
+    preload = undefined;
+  }
+
+  const child = new BrowserWindow({
+    width: 1180,
+    height: 780,
+    minWidth: 860,
+    minHeight: 560,
+    backgroundColor: '#f4f7f2',
+    show: false,
+    title: path.basename(path.resolve(projectPath)),
+    webPreferences: {
+      preload,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: false,
+    },
+  });
+
+  generatedWindows.add(child);
+  child.once('ready-to-show', () => child.show());
+  child.on('closed', () => generatedWindows.delete(child));
+  await child.loadFile(entryPath);
+  return { ok: true, kind: 'electron-window', entryPath };
+}
 
 ipcMain.handle('studio:read-project-files', async (_event, projectPath) => {
   const root = path.resolve(projectPath);
@@ -314,6 +445,278 @@ async function writeProjectFiles(projectPath, files) {
     written.push({ path: relative, content: String(file.content ?? '') });
   }
   return written;
+}
+
+async function prepareGeneratedApp(projectPath, files, appName, options = {}) {
+  const root = path.resolve(projectPath);
+  const normalized = Array.isArray(files)
+    ? files.map((file) => String(file.path || '').replace(/\\/g, '/').replace(/^\/+/, ''))
+    : [];
+  const manifest = await readOrInferAppManifest(root, normalized, appName, options);
+  const launchKind = manifest.launch?.kind || inferLaunchKind(manifest);
+  const entryPath =
+    launchKind === 'none' || launchKind === 'command'
+      ? manifest.launch?.entry || manifest.entry || ''
+      : manifest.launch?.entry || manifest.entry || (await findOrInferHtmlEntry(root, normalized));
+  const safeName = slugify(appName || path.basename(root));
+  const displayName = appName || path.basename(root);
+
+  if (
+    launchKind === 'electron-window' &&
+    !normalized.includes('package.json') &&
+    !(await exists(path.join(root, 'package.json')))
+  ) {
+    await fs.writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify(
+        {
+          name: safeName,
+          version: '0.1.0',
+          private: true,
+          description: 'Local desktop app generated by OpenDesign Vibe Studio.',
+          main: 'electron/main.cjs',
+          scripts: {
+            start: 'electron .',
+          },
+          devDependencies: {
+            electron: '^33.4.11',
+          },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+  }
+
+  if (
+    launchKind === 'electron-window' &&
+    !normalized.includes('electron/main.cjs') &&
+    !(await exists(path.join(root, 'electron', 'main.cjs')))
+  ) {
+    await fs.mkdir(path.join(root, 'electron'), { recursive: true });
+    await fs.writeFile(path.join(root, 'electron', 'main.cjs'), buildGeneratedMain(displayName, entryPath), 'utf8');
+  }
+
+  if (
+    launchKind === 'electron-window' &&
+    !normalized.includes('electron/preload.cjs') &&
+    !(await exists(path.join(root, 'electron', 'preload.cjs')))
+  ) {
+    await fs.mkdir(path.join(root, 'electron'), { recursive: true });
+    await fs.writeFile(
+      path.join(root, 'electron', 'preload.cjs'),
+      `const { contextBridge } = require('electron');\n\ncontextBridge.exposeInMainWorld('desktopApp', {\n  platform: process.platform,\n  generatedBy: 'OpenDesign Vibe Studio',\n});\n`,
+      'utf8',
+    );
+  }
+
+  await fs.writeFile(
+    path.join(root, 'opendesign-app.json'),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        name: appName || path.basename(root),
+        stack: manifest.stack || inferStackFromManifest(manifest),
+        language: manifest.language || inferLanguageFromManifest(manifest),
+        entry: entryPath || undefined,
+        launch: {
+          kind: launchKind,
+          entry: entryPath || undefined,
+          command: manifest.launch?.command,
+        },
+        preparedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+}
+
+async function readOrInferAppManifest(root, pathsFromCurrentWrite, appName, options = {}) {
+  const explicit = await readManifestFile(root, 'opendesign-app.json');
+  if (explicit) {
+    return normalizeManifest(explicit, root, pathsFromCurrentWrite, appName);
+  }
+
+  const legacy = await readManifestFile(root, 'opendesign-desktop.json');
+  if (legacy) {
+    return normalizeManifest(
+      {
+        name: appName || path.basename(root),
+        stack: 'electron',
+        language: 'javascript',
+        entry: legacy.entry,
+        launch: {
+          kind: 'electron-window',
+          entry: legacy.entry,
+        },
+      },
+      root,
+      pathsFromCurrentWrite,
+      appName,
+    );
+  }
+
+  const inferred = await inferAppManifest(root, pathsFromCurrentWrite, appName, options);
+  return normalizeManifest(inferred, root, pathsFromCurrentWrite, appName);
+}
+
+async function readManifestFile(root, fileName) {
+  try {
+    return JSON.parse(await fs.readFile(path.join(root, fileName), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+async function inferAppManifest(root, pathsFromCurrentWrite, appName, options = {}) {
+  const paths = new Set(pathsFromCurrentWrite.map((filePath) => filePath.toLowerCase()));
+  const packageJson = await readManifestFile(root, 'package.json');
+  const htmlEntry = await findOrInferHtmlEntry(root, pathsFromCurrentWrite).catch(() => '');
+  const pythonEntry =
+    pathsFromCurrentWrite.find((filePath) => filePath.toLowerCase() === 'main.py') ??
+    pathsFromCurrentWrite.find((filePath) => filePath.toLowerCase().endsWith('.py'));
+
+  if (options.preferDesktop || paths.has('electron/main.cjs') || packageJson?.main?.includes('electron')) {
+    return {
+      name: appName || path.basename(root),
+      stack: 'electron',
+      language: 'javascript',
+      entry: htmlEntry || 'renderer/index.html',
+      launch: { kind: 'electron-window', entry: htmlEntry || 'renderer/index.html' },
+    };
+  }
+
+  if (packageJson?.scripts?.start) {
+    return {
+      name: appName || packageJson.name || path.basename(root),
+      stack: packageJson.dependencies?.electron || packageJson.devDependencies?.electron ? 'electron' : 'node',
+      language: 'javascript',
+      entry: htmlEntry || '',
+      launch: packageJson.dependencies?.electron || packageJson.devDependencies?.electron
+        ? { kind: 'electron-window', entry: htmlEntry || 'renderer/index.html' }
+        : { kind: 'command', command: 'npm start' },
+    };
+  }
+
+  if (pythonEntry) {
+    return {
+      name: appName || path.basename(root),
+      stack: 'python',
+      language: 'python',
+      entry: pythonEntry,
+      launch: { kind: 'command', command: `python ${quoteShellArg(pythonEntry)}` },
+    };
+  }
+
+  if (htmlEntry) {
+    return {
+      name: appName || path.basename(root),
+      stack: 'static-web',
+      language: 'html/css/javascript',
+      entry: htmlEntry,
+      launch: { kind: 'browser', entry: htmlEntry },
+    };
+  }
+
+  return {
+    name: appName || path.basename(root),
+    stack: 'files',
+    language: 'mixed',
+    launch: { kind: 'none' },
+  };
+}
+
+function normalizeManifest(manifest, root, pathsFromCurrentWrite, appName) {
+  const launch = manifest.launch || {};
+  const entry = launch.entry || manifest.entry || '';
+  return {
+    schemaVersion: 1,
+    name: manifest.name || appName || path.basename(root),
+    stack: manifest.stack || 'custom',
+    language: manifest.language || 'mixed',
+    entry,
+    launch: {
+      kind: launch.kind || inferLaunchKind(manifest),
+      entry,
+      command: launch.command,
+    },
+    files: manifest.files,
+    notes: manifest.notes,
+  };
+}
+
+async function findOrInferHtmlEntry(root, pathsFromCurrentWrite) {
+  const candidates = [
+    'renderer/index.html',
+    'app/index.html',
+    'src/index.html',
+    'index.html',
+    ...pathsFromCurrentWrite.filter((filePath) => filePath.endsWith('index.html')),
+    ...pathsFromCurrentWrite.filter((filePath) => filePath.endsWith('.html')),
+  ];
+
+  for (const candidate of [...new Set(candidates)]) {
+    if (pathsFromCurrentWrite.includes(candidate) || (await exists(path.join(root, candidate)))) {
+      return candidate;
+    }
+  }
+
+  throw new Error('No HTML entry was generated. Browser and Electron launches need renderer/index.html or another .html file.');
+}
+
+function inferLaunchKind(manifest) {
+  const stack = String(manifest.stack || '').toLowerCase();
+  if (manifest.launch?.kind) {
+    return manifest.launch.kind;
+  }
+  if (stack.includes('electron') || stack.includes('desktop')) {
+    return 'electron-window';
+  }
+  if (stack.includes('web') || String(manifest.entry || '').endsWith('.html')) {
+    return 'browser';
+  }
+  if (manifest.launch?.command) {
+    return 'command';
+  }
+  return 'none';
+}
+
+function inferStackFromManifest(manifest) {
+  return manifest.stack || (inferLaunchKind(manifest) === 'electron-window' ? 'electron' : 'custom');
+}
+
+function inferLanguageFromManifest(manifest) {
+  return manifest.language || (String(manifest.stack || '').includes('python') ? 'python' : 'mixed');
+}
+
+function resolveInside(root, relativePath) {
+  const resolved = path.resolve(root, String(relativePath || ''));
+  if (!resolved.startsWith(root)) {
+    throw new Error(`Refusing to launch outside project: ${relativePath}`);
+  }
+  return resolved;
+}
+
+function quoteShellArg(value) {
+  return `"${String(value).replaceAll('"', '\\"')}"`;
+}
+
+function buildGeneratedMain(displayName, entryPath) {
+  const escapedTitle = JSON.stringify(displayName);
+  const escapedEntry = JSON.stringify(entryPath);
+  return `const { app, BrowserWindow } = require('electron');\nconst path = require('node:path');\n\nfunction createWindow() {\n  const win = new BrowserWindow({\n    width: 1180,\n    height: 780,\n    minWidth: 860,\n    minHeight: 560,\n    title: ${escapedTitle},\n    backgroundColor: '#f4f7f2',\n    webPreferences: {\n      preload: path.join(__dirname, 'preload.cjs'),\n      contextIsolation: true,\n      nodeIntegration: false,\n    },\n  });\n\n  win.loadFile(path.join(__dirname, '..', ${escapedEntry}));\n}\n\napp.whenReady().then(() => {\n  createWindow();\n\n  app.on('activate', () => {\n    if (BrowserWindow.getAllWindows().length === 0) {\n      createWindow();\n    }\n  });\n});\n\napp.on('window-all-closed', () => {\n  if (process.platform !== 'darwin') {\n    app.quit();\n  }\n});\n`;
+}
+
+async function exists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function callChatCompletion(provider, messages) {

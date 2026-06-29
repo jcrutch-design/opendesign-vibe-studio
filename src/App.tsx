@@ -50,6 +50,10 @@ type BuildResult = {
   providerName?: string;
   projectPath: string;
   previewPath?: string;
+  launchEntryPath?: string;
+  stack: string;
+  language: string;
+  launchKind: string;
   filesWritten: number;
   completedAt: string;
   launchPrompt: string;
@@ -95,7 +99,7 @@ export function App() {
   const [files, setFiles] = useState<GeneratedFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<string>('index.html');
   const [chatPrompt, setChatPrompt] = useState(
-    'Turn the OpenDesign output and brief into a complete functional static app. Make it feel production-ready.',
+    'Turn the OpenDesign output and brief into a complete functional app. Choose the language, framework, and runtime that best fit the request, and make it feel production-ready.',
   );
   const [status, setStatus] = useState('Ready');
   const [busy, setBusy] = useState<string>();
@@ -167,7 +171,9 @@ export function App() {
     if (!activeProject) {
       return '';
     }
-    const index = files.find((file) => file.path.endsWith('index.html'));
+    const index =
+      files.find((file) => file.path === 'renderer/index.html') ??
+      files.find((file) => file.path.endsWith('index.html'));
     return index ? `file:///${activeProject.path.replace(/\\/g, '/')}/${index.path}` : '';
   }, [activeProject, files]);
 
@@ -353,16 +359,22 @@ export function App() {
                 `User coding request:\n${chatPrompt}`,
                 `Clarifications:\n${options.clarificationAnswer || 'No extra clarification. Proceed with reasonable product assumptions.'}`,
                 `Existing files:\n${JSON.stringify(existingFiles.slice(0, 20))}`,
+                'Choose the most appropriate language, framework, and runtime for this request.',
+                'Examples: Electron/JavaScript for polished local desktop UI, Python for automation/data tools, Node for CLI/server utilities, static HTML/CSS/JS for simple standalone web artifacts, or another stack when clearly better.',
+                'Always include opendesign-app.json. It must describe the chosen stack and how the studio should launch it.',
+                'Manifest shape:',
+                '{"schemaVersion":1,"name":"App name","stack":"electron|python|node|static-web|custom","language":"javascript|python|...","entry":"relative/path","launch":{"kind":"electron-window|browser|command|none","entry":"relative/path","command":"optional command"}}',
+                'If the user asks for a Windows/local desktop app, prefer Electron unless another native stack is clearly better.',
+                'If you choose Electron, include package.json, electron/main.cjs, electron/preload.cjs, renderer/index.html, renderer/styles.css, and renderer/app.js.',
+                'If you choose command launch, keep dependencies minimal and include a clear start command in opendesign-app.json.',
+                'The generated app must feel production-ready for its chosen platform, with real interactions, realistic states, and no default unstyled scaffold UI.',
                 'Return only complete file blocks and no extra prose.',
-                'Use this exact format for every file:',
-                '```file:index.html',
-                '<!doctype html>...',
+                'Use this file-block format:',
+                '```file:opendesign-app.json',
+                '{"schemaVersion":1,"stack":"electron","language":"javascript","entry":"renderer/index.html","launch":{"kind":"electron-window","entry":"renderer/index.html"}}',
                 '```',
-                '```file:styles.css',
-                '/* complete css */',
-                '```',
-                '```file:app.js',
-                '// complete javascript',
+                '```file:relative/path.ext',
+                'complete file contents',
                 '```',
               ].join('\n\n'),
             },
@@ -385,19 +397,39 @@ export function App() {
             );
           }
         }
+
+        const outputIssues = getGeneratedOutputIssues(generated);
+        if (outputIssues.length) {
+          setStatus('The model returned an incomplete app. Repairing the app manifest and launch files...');
+          setVibeProgress({ label: 'Repairing generated app', step: 5, total: 6 });
+          const repaired = await repairGeneratedFileManifest(activeProvider, response, outputIssues.join('\n'));
+          generated = extractGeneratedFiles(repaired);
+          const remainingIssues = getGeneratedOutputIssues(generated);
+          if (remainingIssues.length) {
+            throw new Error(
+              `The model did not produce a complete launchable app. Missing or weak output: ${remainingIssues.join('; ')}`,
+            );
+          }
+        }
       }
 
-      setVibeProgress({ label: `Writing ${generated.length} files`, step: activeProvider?.endpoint ? 6 : 5, total: activeProvider?.endpoint ? 6 : 5 });
+      setVibeProgress({ label: `Writing ${generated.length} app files`, step: activeProvider?.endpoint ? 6 : 5, total: activeProvider?.endpoint ? 6 : 5 });
       const written = await window.studio.writeProjectFiles(project.path, generated);
-      setFiles(written);
-      setSelectedFile(written.find((file) => file.path.endsWith('index.html'))?.path ?? written[0]?.path ?? '');
-      const result = makeBuildResult(project, written, realBuild, activeProvider?.name);
+      const prepared = await window.studio.prepareGeneratedApp(project.path, written, project.name);
+      setFiles(prepared);
+      setSelectedFile(
+        prepared.find((file) => file.path === 'renderer/index.html')?.path ??
+          prepared.find((file) => file.path.endsWith('index.html'))?.path ??
+          prepared[0]?.path ??
+          '',
+      );
+      const result = makeBuildResult(project, prepared, realBuild, activeProvider?.name);
       setBuildResult(result);
       setClarification(undefined);
       setStatus(
         result.kind === 'real'
-          ? `Real app built: ${written.length} files ready to launch`
-          : `Starter app built: ${written.length} files ready to launch`,
+          ? `${result.stack} app built: ${prepared.length} files ready to launch`
+          : `${result.stack} starter built: ${prepared.length} files ready to launch`,
       );
       setView('code');
       setVibeProgress({ label: 'Build complete. Launch deck ready.', step: activeProvider?.endpoint ? 6 : 5, total: activeProvider?.endpoint ? 6 : 5 });
@@ -445,23 +477,20 @@ export function App() {
         {
           role: 'system',
           content:
-            'You repair malformed code-generation output. Do not write new code unless needed to preserve the original files. Convert the provided response into complete fenced file blocks.',
+            'You repair or upgrade code-generation output. Choose or preserve the most appropriate language/framework for the user request. Convert the provided response into complete fenced file blocks for a launchable, polished app. Always include opendesign-app.json with stack and launch instructions.',
         },
         {
           role: 'user',
           content: [
             `Parse error:\n${parseError}`,
             'The previous answer was intended to contain generated app files, but its JSON was invalid.',
-            'Rewrite it as file fences only, with no prose before or after.',
+            'Rewrite it as file fences only, with no prose before or after. Preserve or choose the most appropriate stack for the user request.',
             'Use this exact format:',
-            '```file:index.html',
-            '<!doctype html>...',
+            '```file:opendesign-app.json',
+            '{"schemaVersion":1,"stack":"electron|python|node|static-web|custom","language":"javascript|python|...","entry":"relative/path","launch":{"kind":"electron-window|browser|command|none","entry":"relative/path","command":"optional command"}}',
             '```',
-            '```file:styles.css',
-            '/* complete css */',
-            '```',
-            '```file:app.js',
-            '// complete javascript',
+            '```file:relative/path.ext',
+            'complete file contents',
             '```',
             `Previous answer:\n${brokenResponse}`,
           ].join('\n\n'),
@@ -498,12 +527,16 @@ export function App() {
   }
 
   async function launchBuiltApp() {
-    if (!buildResult?.previewPath) {
-      setStatus('No index.html file was generated to launch.');
+    if (!activeProject) {
+      setStatus('Create or import a project first.');
       return;
     }
-    await window.studio.openPath(buildResult.previewPath);
-    setStatus('Launched generated app in your default browser');
+    const result = await window.studio.launchGeneratedApp(activeProject.path);
+    if (result.command) {
+      setStatus(`Launched ${result.kind} app with ${result.command}`);
+    } else {
+      setStatus(`Launched ${result.kind} app from ${result.entryPath ? compactPath(result.entryPath) : activeProject.name}`);
+    }
   }
 
   async function openActiveProjectFolder() {
@@ -1098,7 +1131,7 @@ function BuildCompletePanel(props: {
   onOpenFolder: () => void;
   onCopyPrompt: () => void;
 }) {
-  const label = props.result.kind === 'real' ? 'Real app built' : 'Starter app built';
+  const label = props.result.kind === 'real' ? `${props.result.stack} app built` : `${props.result.stack} starter built`;
   const detail =
     props.result.kind === 'real'
       ? `Generated with ${props.result.providerName ?? 'the selected model'}`
@@ -1121,12 +1154,16 @@ function BuildCompletePanel(props: {
           <dd>{compactPath(props.result.projectPath)}</dd>
         </div>
         <div>
-          <dt>Entry</dt>
-          <dd>{props.result.previewPath ? compactPath(props.result.previewPath) : 'No index.html'}</dd>
+          <dt>Stack</dt>
+          <dd>{props.result.language} / {props.result.launchKind}</dd>
+        </div>
+        <div>
+          <dt>Launch</dt>
+          <dd>{props.result.launchEntryPath ? compactPath(props.result.launchEntryPath) : 'Command or manual'}</dd>
         </div>
       </dl>
       <div className="launch-actions">
-        <button className="primary" onClick={props.onLaunch} disabled={!props.result.previewPath}>
+        <button className="primary" onClick={props.onLaunch} disabled={props.result.launchKind === 'none'}>
           <Rocket size={16} />
           Launch app
         </button>
@@ -1278,7 +1315,10 @@ function getWorkflowStages(input: {
   const briefDone = !!input.brief.trim();
   const proposalDone = !!input.designOutput.trim();
   const questionDone = !input.clarification && (input.files.length > 0 || !!input.buildResult);
-  const buildDone = input.files.some((file) => file.path.endsWith('index.html'));
+  const buildDone =
+    !!input.buildResult ||
+    input.files.some((file) => file.path.toLowerCase() === 'opendesign-app.json') ||
+    input.files.some((file) => file.path.endsWith('index.html'));
   const launchDone = !!input.buildResult;
   const activeId: WorkflowStageId =
     input.clarification
@@ -1397,26 +1437,128 @@ function extractJsonSource(raw: string) {
   return firstBrace >= 0 && lastBrace > firstBrace ? source.slice(firstBrace, lastBrace + 1) : '';
 }
 
+function getGeneratedOutputIssues(files: GeneratedFile[]) {
+  const paths = new Set(files.map((file) => file.path.toLowerCase()));
+  const issues: string[] = [];
+  const manifest = readGeneratedManifest(files);
+  const htmlFile =
+    files.find((file) => file.path.toLowerCase() === 'renderer/index.html') ??
+    files.find((file) => file.path.toLowerCase().endsWith('index.html'));
+  const cssFile =
+    files.find((file) => file.path.toLowerCase() === 'renderer/styles.css') ??
+    files.find((file) => file.path.toLowerCase().endsWith('styles.css'));
+  const jsFile =
+    files.find((file) => file.path.toLowerCase() === 'renderer/app.js') ??
+    files.find((file) => file.path.toLowerCase().endsWith('app.js'));
+
+  if (!manifest) {
+    issues.push('opendesign-app.json is required with stack, language, and launch instructions');
+    return issues;
+  }
+
+  const launchKind = String(manifest.launch?.kind || '').trim();
+  const stack = String(manifest.stack || '').toLowerCase();
+  if (!manifest.stack) {
+    issues.push('opendesign-app.json must include stack');
+  }
+  if (!manifest.language) {
+    issues.push('opendesign-app.json must include language');
+  }
+  if (!launchKind) {
+    issues.push('opendesign-app.json launch.kind is required');
+  }
+
+  if (launchKind === 'command' && !manifest.launch?.command) {
+    issues.push('command launch requires launch.command');
+  }
+  if ((launchKind === 'browser' || launchKind === 'electron-window') && !manifest.launch?.entry && !manifest.entry) {
+    issues.push(`${launchKind} launch requires launch.entry`);
+  }
+
+  if (stack.includes('electron')) {
+    if (!paths.has('package.json')) {
+      issues.push('package.json is required for Electron apps');
+    }
+    if (!paths.has('electron/main.cjs')) {
+      issues.push('electron/main.cjs must create the BrowserWindow');
+    }
+    if (!paths.has('electron/preload.cjs')) {
+      issues.push('electron/preload.cjs should expose safe desktop metadata');
+    }
+  }
+
+  if ((stack.includes('web') || stack.includes('electron') || launchKind === 'browser' || launchKind === 'electron-window') && !htmlFile) {
+    issues.push('HTML renderer entry is required for visual web/Electron apps');
+  }
+  if (htmlFile && cssFile && !/href=["'][^"']*styles\.css["']/i.test(htmlFile.content)) {
+    issues.push('HTML entry must load the CSS file');
+  }
+  if (htmlFile && jsFile && !/src=["'][^"']*app\.js["']/i.test(htmlFile.content)) {
+    issues.push('HTML entry must load the app JavaScript file');
+  }
+  if (cssFile && cssFile.content.replace(/\s/g, '').length < 900) {
+    issues.push('CSS is too thin; visual app output may look like unstyled browser HTML');
+  }
+  if (htmlFile && /<table[^>]*>\s*<thead>\s*<tr>\s*<th>Name<\/th>/i.test(htmlFile.content)) {
+    issues.push('visual UI looks like a default scaffold instead of a polished app');
+  }
+
+  return issues;
+}
+
+function readGeneratedManifest(files: GeneratedFile[]) {
+  const manifestFile = files.find((file) => file.path.toLowerCase() === 'opendesign-app.json');
+  if (!manifestFile) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(manifestFile.content) as {
+      stack?: string;
+      language?: string;
+      entry?: string;
+      launch?: {
+        kind?: string;
+        entry?: string;
+        command?: string;
+      };
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function makeBuildResult(
   project: StudioProject,
   written: GeneratedFile[],
   realBuild: boolean,
   providerName?: string,
 ): BuildResult {
-  const indexFile = written.find((file) => file.path.endsWith('index.html'));
+  const manifest = readGeneratedManifest(written);
+  const indexFile =
+    written.find((file) => file.path === 'renderer/index.html') ??
+    written.find((file) => file.path.endsWith('index.html'));
+  const launchEntry = manifest?.launch?.entry ?? manifest?.entry ?? indexFile?.path;
+  const launchEntryPath = launchEntry ? toDiskPath(project.path, launchEntry) : undefined;
   const previewPath = indexFile ? toDiskPath(project.path, indexFile.path) : undefined;
-  const promptSubject = realBuild ? 'the real generated app' : 'the generated starter app';
+  const stack = manifest?.stack ?? 'custom';
+  const language = manifest?.language ?? 'mixed';
+  const launchKind = manifest?.launch?.kind ?? (previewPath ? 'browser' : 'none');
+  const promptSubject = realBuild ? `the generated ${stack} app` : `the generated ${stack} starter app`;
 
   return {
     kind: realBuild ? 'real' : 'starter',
     providerName,
     projectPath: project.path,
     previewPath,
+    launchEntryPath,
+    stack,
+    language,
+    launchKind,
     filesWritten: written.length,
     completedAt: new Date().toISOString(),
     launchPrompt: [
-      `Launch ${promptSubject} from ${previewPath ?? project.path}.`,
-      'Test the primary workflow like a first-time Windows user.',
+      `Launch ${promptSubject} using ${launchKind}${launchEntryPath ? ` at ${launchEntryPath}` : ''}.`,
+      'Test the primary workflow like a first-time user on the chosen platform.',
       'Then improve the app with persistent state, empty/error states, keyboard focus, and one polished interaction that makes the product feel finished.',
     ].join('\n'),
   };

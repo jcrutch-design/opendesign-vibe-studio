@@ -6,7 +6,6 @@ import {
   Check,
   CheckCircle2,
   Code2,
-  Copy,
   ExternalLink,
   FileCode2,
   FolderInput,
@@ -447,6 +446,13 @@ export function App() {
             );
           }
         }
+
+        setVibeProgress({ label: 'Reviewing basic app functionality', step: 5, total: 6 });
+        generated = reviewAndCompleteBasicFunctionality(generated, brief, designOutput);
+        const functionalityIssues = getBasicFunctionalityIssues(generated);
+        if (functionalityIssues.length) {
+          setStatus(`Built with basic functionality safeguards: ${functionalityIssues.join('; ')}`);
+        }
       }
 
       setVibeProgress({ label: `Writing ${generated.length} app files`, step: activeProvider?.endpoint ? 6 : 5, total: activeProvider?.endpoint ? 6 : 5 });
@@ -586,12 +592,26 @@ export function App() {
     setStatus('Opened project folder');
   }
 
-  async function copyLaunchPrompt() {
+  function openRefineAssistant() {
     if (!buildResult) {
       return;
     }
-    await navigator.clipboard.writeText(buildResult.launchPrompt);
-    setStatus('Copied the next-run prompt');
+    setAssistantMode('runtime');
+    setAssistantPrompt('');
+    setAssistantOpen(true);
+    setAssistantMessages((current) => [
+      ...current,
+      {
+        id: `assistant-refine-${Date.now()}`,
+        role: 'assistant',
+        content: [
+          'What would you like to adjust in the app?',
+          '',
+          'I can change layout, styling, copy, flows, button behavior, state, or the runtime preview files directly.',
+        ].join('\n'),
+      },
+    ]);
+    setStatus('Refine chat opened. Tell the assistant what to adjust.');
   }
 
   async function runMiniAssistant() {
@@ -980,7 +1000,7 @@ export function App() {
             onGenerate={() => void generateApp()}
             onLaunch={() => void launchBuiltApp()}
             onOpenFolder={() => void openActiveProjectFolder()}
-            onCopyPrompt={() => void copyLaunchPrompt()}
+            onRefine={openRefineAssistant}
           />
         )}
 
@@ -1301,7 +1321,7 @@ function CodeView(props: {
   onGenerate: () => void;
   onLaunch: () => void;
   onOpenFolder: () => void;
-  onCopyPrompt: () => void;
+  onRefine: () => void;
 }) {
   const [composerOpen, setComposerOpen] = useState(!props.files.length);
   const buildLabel = props.files.length ? 'Rebuild app' : 'Build app';
@@ -1382,7 +1402,7 @@ function CodeView(props: {
             result={props.buildResult}
             onLaunch={props.onLaunch}
             onOpenFolder={props.onOpenFolder}
-            onCopyPrompt={props.onCopyPrompt}
+            onRefine={props.onRefine}
           />
         )}
         {props.previewFile ? (
@@ -1449,7 +1469,7 @@ function BuildCompletePanel(props: {
   result: BuildResult;
   onLaunch: () => void;
   onOpenFolder: () => void;
-  onCopyPrompt: () => void;
+  onRefine: () => void;
 }) {
   const label = props.result.kind === 'real' ? `${props.result.stack} app built` : `${props.result.stack} starter built`;
   const detail =
@@ -1491,8 +1511,8 @@ function BuildCompletePanel(props: {
           <FolderOpen size={16} />
           Folder
         </button>
-        <button className="secondary" onClick={props.onCopyPrompt}>
-          <Copy size={16} />
+        <button className="secondary" onClick={props.onRefine}>
+          <MessageSquare size={16} />
           Refine
         </button>
       </div>
@@ -1923,6 +1943,116 @@ function completeLaunchableOutput(files: GeneratedFile[], brief: string, designO
   return mergeGeneratedFiles(completed, additions);
 }
 
+function reviewAndCompleteBasicFunctionality(files: GeneratedFile[], brief: string, designOutput: string) {
+  let completed = completeLaunchableOutput(files, brief, designOutput);
+  const htmlFile = getRuntimePreviewFile(completed);
+  if (!htmlFile || !hasInteractiveHtml(htmlFile.content)) {
+    return completed;
+  }
+
+  const additions: GeneratedFile[] = [];
+  const scriptRefs = extractLocalScriptRefs(htmlFile.content);
+  let nextHtml = htmlFile.content;
+
+  if (!scriptRefs.length) {
+    const fallbackRef = 'app.js';
+    const fallbackPath = resolveAssetPath(htmlFile.path, fallbackRef);
+    nextHtml = injectScriptRef(nextHtml, fallbackRef);
+    if (fallbackPath) {
+      additions.push({ path: fallbackPath, content: buildAutoCompletedScript() });
+    }
+  }
+
+  completed = mergeGeneratedFiles(completed, additions);
+  if (nextHtml !== htmlFile.content) {
+    completed = mergeGeneratedFiles(completed, [{ path: htmlFile.path, content: nextHtml }]);
+  }
+
+  const refreshedHtml = getRuntimePreviewFile(completed);
+  if (!refreshedHtml) {
+    return completed;
+  }
+
+  const scriptFiles = getScriptFilesForHtml(refreshedHtml, completed);
+  const patchedScripts = scriptFiles.map((scriptFile) => {
+    if (hasUsefulScriptBehavior(scriptFile.content, refreshedHtml.content)) {
+      return scriptFile;
+    }
+    const separator = scriptFile.content.trim() ? '\n\n' : '';
+    return {
+      path: scriptFile.path,
+      content: `${scriptFile.content.trimEnd()}${separator}${buildAutoCompletedScript()}`,
+    };
+  });
+
+  return mergeGeneratedFiles(completed, patchedScripts);
+}
+
+function getBasicFunctionalityIssues(files: GeneratedFile[]) {
+  const htmlFile = getRuntimePreviewFile(files);
+  if (!htmlFile || !hasInteractiveHtml(htmlFile.content)) {
+    return [];
+  }
+  const issues: string[] = [];
+  const scriptFiles = getScriptFilesForHtml(htmlFile, files);
+  if (!scriptFiles.length) {
+    issues.push('added a basic interaction script');
+    return issues;
+  }
+  if (scriptFiles.some((file) => !hasUsefulScriptBehavior(file.content, htmlFile.content))) {
+    issues.push('patched placeholder button handlers');
+  }
+  return issues;
+}
+
+function hasInteractiveHtml(html: string) {
+  return /<(button|input|select|textarea|form)\b/i.test(html) || /\bdata-section=/i.test(html);
+}
+
+function extractLocalScriptRefs(html: string) {
+  const refs: string[] = [];
+  const scriptPattern = /<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = scriptPattern.exec(html)) !== null) {
+    const ref = match[1].trim();
+    if (!ref || ref.startsWith('#') || /^(?:[a-z]+:)?\/\//i.test(ref) || /^(?:data|blob):/i.test(ref)) {
+      continue;
+    }
+    const cleanRef = ref.split(/[?#]/)[0];
+    if (cleanRef && !cleanRef.startsWith('/')) {
+      refs.push(cleanRef);
+    }
+  }
+  return [...new Set(refs)];
+}
+
+function getScriptFilesForHtml(htmlFile: GeneratedFile, files: GeneratedFile[]) {
+  const refs = extractLocalScriptRefs(htmlFile.content);
+  return refs
+    .map((ref) => {
+      const resolved = resolveAssetPath(htmlFile.path, ref);
+      return resolved ? files.find((file) => file.path.toLowerCase() === resolved.toLowerCase()) : undefined;
+    })
+    .filter((file): file is GeneratedFile => !!file);
+}
+
+function hasUsefulScriptBehavior(script: string, html: string) {
+  if (/addEventListener|onclick|onchange|onsubmit|querySelector|getElementById/i.test(script)) {
+    return true;
+  }
+  if (/\bdata-section=/i.test(html) && /data-section|section-/.test(script)) {
+    return true;
+  }
+  return false;
+}
+
+function injectScriptRef(html: string, scriptRef: string) {
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, `  <script src="${scriptRef}"></script>\n</body>`);
+  }
+  return `${html.trimEnd()}\n<script src="${scriptRef}"></script>\n`;
+}
+
 function buildAutoCompletedCss(brief: string, designOutput: string) {
   const themeHint = `${brief} ${designOutput}`.toLowerCase();
   const accent = themeHint.includes('router') || themeHint.includes('model') ? '#0b6f78' : '#165d66';
@@ -2140,34 +2270,180 @@ pre,
 }
 
 function buildAutoCompletedScript() {
-  return `const sectionButtons = document.querySelectorAll('[data-section]');
-const sections = Array.from(document.querySelectorAll('[id^="section-"]'));
+  return `(() => {
+  if (window.__opendesignBasicFunctionality) {
+    return;
+  }
+  window.__opendesignBasicFunctionality = true;
 
-sectionButtons.forEach((button) => {
-  button.addEventListener('click', () => {
-    const target = button.getAttribute('data-section');
-    sectionButtons.forEach((item) => item.classList.toggle('active', item === button));
+  const state = {
+    endpoints: JSON.parse(localStorage.getItem('opendesign:endpoints') || '[]'),
+    models: ['gpt-4.1', 'claude-3-5-sonnet', 'llama-3.1-local', 'qwen2.5-coder'],
+  };
+
+  const byId = (id) => document.getElementById(id);
+  const valueOf = (id) => byId(id)?.value?.trim() || '';
+  const setText = (selector, text) => {
+    const target = document.querySelector(selector);
+    if (target) {
+      target.textContent = text;
+    }
+  };
+
+  function flash(button, label = 'Done') {
+    if (!button) {
+      return;
+    }
+    const original = button.dataset.originalText || button.textContent || 'Ready';
+    button.dataset.originalText = original;
+    button.textContent = label;
+    window.setTimeout(() => {
+      button.textContent = original;
+    }, 950);
+  }
+
+  function showSection(name) {
+    const sectionButtons = document.querySelectorAll('[data-section]');
+    const sections = Array.from(document.querySelectorAll('[id^="section-"]'));
+    sectionButtons.forEach((button) => {
+      button.classList.toggle('active', button.getAttribute('data-section') === name);
+    });
     sections.forEach((section) => {
-      const active = section.id === 'section-' + target;
+      const active = section.id === 'section-' + name;
       section.classList.toggle('hidden', !active);
       section.style.display = active ? '' : 'none';
     });
-  });
-});
+  }
 
-document.querySelectorAll('button').forEach((button) => {
-  button.addEventListener('click', () => {
-    if (!button.dataset.originalText) {
-      button.dataset.originalText = button.textContent || '';
+  function persist() {
+    localStorage.setItem('opendesign:endpoints', JSON.stringify(state.endpoints));
+  }
+
+  function renderEndpoints() {
+    const list = byId('endpoint-list');
+    const tbody = byId('endpoints-tbody');
+    const select = byId('select-endpoint');
+
+    if (list) {
+      list.innerHTML = '';
+      state.endpoints.forEach((endpoint) => {
+        const item = document.createElement('li');
+        item.textContent = endpoint.name + ' - ' + endpoint.url + ' - Ready';
+        list.appendChild(item);
+      });
     }
-    if (/save|start|fetch|refresh/i.test(button.dataset.originalText)) {
-      button.textContent = 'Done';
-      window.setTimeout(() => {
-        button.textContent = button.dataset.originalText || 'Ready';
-      }, 900);
+
+    if (tbody) {
+      tbody.innerHTML = '';
+      state.endpoints.forEach((endpoint, index) => {
+        const row = document.createElement('tr');
+        row.innerHTML = '<td>' + endpoint.name + '</td><td>' + endpoint.url + '</td><td>Ready</td><td><button data-remove-endpoint="' + index + '">Remove</button></td>';
+        tbody.appendChild(row);
+      });
+    }
+
+    if (select) {
+      select.innerHTML = '';
+      state.endpoints.forEach((endpoint) => {
+        const option = document.createElement('option');
+        option.value = endpoint.name;
+        option.textContent = endpoint.name;
+        select.appendChild(option);
+      });
+    }
+  }
+
+  function renderModels() {
+    const modelSelect = byId('model-select');
+    const tbody = byId('models-tbody');
+    if (modelSelect) {
+      modelSelect.innerHTML = '';
+      state.models.forEach((model) => {
+        const option = document.createElement('option');
+        option.value = model;
+        option.textContent = model;
+        modelSelect.appendChild(option);
+      });
+    }
+    if (tbody) {
+      tbody.innerHTML = '';
+      state.models.forEach((model) => {
+        const row = document.createElement('tr');
+        row.innerHTML = '<td>' + model + '</td><td>Demo provider</td><td>128k</td><td>Available</td>';
+        tbody.appendChild(row);
+      });
+    }
+  }
+
+  document.addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) {
+      return;
+    }
+
+    const section = button.getAttribute('data-section');
+    if (section) {
+      showSection(section);
+      return;
+    }
+
+    if (button.id === 'add-endpoint-btn') {
+      byId('endpoint-name')?.focus();
+      return;
+    }
+
+    if (button.id === 'save-endpoint') {
+      const endpoint = {
+        name: valueOf('endpoint-name') || 'Local endpoint',
+        url: valueOf('endpoint-url') || 'http://localhost:11434/v1',
+        key: valueOf('endpoint-key'),
+      };
+      state.endpoints.push(endpoint);
+      persist();
+      renderEndpoints();
+      flash(button, 'Saved');
+      return;
+    }
+
+    if (button.id === 'refresh-models' || /fetch models/i.test(button.textContent || '')) {
+      renderModels();
+      flash(button, 'Models loaded');
+      return;
+    }
+
+    if (button.id === 'save-config') {
+      flash(button, 'Config saved');
+      setText('#sample-request', JSON.stringify({ model: state.models[0], messages: [{ role: 'user', content: 'Hello' }] }, null, 2));
+      return;
+    }
+
+    if (button.id === 'start-session') {
+      setText('#sample-request', JSON.stringify({ route: 'auto', prompt: 'Explain this request' }, null, 2));
+      setText('#sample-response', JSON.stringify({ provider: state.endpoints[0]?.name || 'demo', status: 'routed', latencyMs: 42 }, null, 2));
+      flash(button, 'Session ready');
+      return;
+    }
+
+    const removeIndex = button.getAttribute('data-remove-endpoint');
+    if (removeIndex !== null) {
+      state.endpoints.splice(Number(removeIndex), 1);
+      persist();
+      renderEndpoints();
+      renderModels();
+      return;
+    }
+
+    if (/save|start|fetch|refresh/i.test(button.textContent || '')) {
+      flash(button);
     }
   });
-});
+
+  renderEndpoints();
+  renderModels();
+  if (document.querySelector('[data-section].active')) {
+    showSection(document.querySelector('[data-section].active').getAttribute('data-section'));
+  }
+})();
 `;
 }
 

@@ -1,6 +1,11 @@
 import type { GeneratedFile } from './types';
 
 export function extractGeneratedFiles(raw: string): GeneratedFile[] {
+  const fencedFiles = extractFencedFiles(raw);
+  if (fencedFiles.length) {
+    return fencedFiles;
+  }
+
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const source = fenced?.[1] ?? raw;
   const firstBrace = source.indexOf('{');
@@ -10,7 +15,16 @@ export function extractGeneratedFiles(raw: string): GeneratedFile[] {
     throw new Error('The model did not return a JSON file manifest.');
   }
 
-  const parsed = JSON.parse(source.slice(firstBrace, lastBrace + 1));
+  let parsed: { files?: unknown[] };
+  try {
+    parsed = JSON.parse(source.slice(firstBrace, lastBrace + 1));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `The model returned a broken JSON file manifest (${message}). ` +
+        'Ask it to return fenced file blocks like ```file:index.html instead.',
+    );
+  }
   if (!Array.isArray(parsed.files)) {
     throw new Error('The JSON response must contain a files array.');
   }
@@ -25,6 +39,46 @@ export function extractGeneratedFiles(raw: string): GeneratedFile[] {
       content: value.content,
     };
   });
+}
+
+function extractFencedFiles(raw: string): GeneratedFile[] {
+  const files: GeneratedFile[] = [];
+  const blockPattern = /```([^\n`]*)\n([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = blockPattern.exec(raw)) !== null) {
+    const info = match[1].trim();
+    const content = match[2].replace(/\s+$/, '');
+    const path = readFencePath(info);
+    if (!path) {
+      continue;
+    }
+    files.push({
+      path: normalizePath(path),
+      content,
+    });
+  }
+
+  return files;
+}
+
+function readFencePath(info: string) {
+  const direct = info.match(/^(?:file|path)[:=]([^\s]+)$/i);
+  if (direct?.[1]) {
+    return direct[1];
+  }
+
+  const named = info.match(/\b(?:file|path)=["']?([^"'\s]+)["']?/i);
+  if (named?.[1]) {
+    return named[1];
+  }
+
+  const barePath = info.match(/^([^\s]+\.(?:html|css|js|jsx|ts|tsx|json|md|svg|txt))$/i);
+  return barePath?.[1] ?? '';
+}
+
+function normalizePath(value: string) {
+  return value.replace(/\\/g, '/').replace(/^\/+/, '');
 }
 
 export function createFallbackApp(brief: string, designNotes: string): GeneratedFile[] {

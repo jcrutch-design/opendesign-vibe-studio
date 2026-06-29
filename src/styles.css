@@ -39,7 +39,7 @@ textarea:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 72px var(--project-rail-width, 292px) 6px minmax(0, 1fr);
+  grid-template-columns: 72px clamp(164px, var(--project-rail-width, 292px), 34vw) 6px minmax(0, 1fr);
   height: 100vh;
   background:
     linear-gradient(90deg, rgba(22, 93, 102, 0.07) 1px, transparent 1px),
@@ -220,11 +220,12 @@ textarea:focus-visible {
 }
 
 .workspace {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: clamp(8px, 1vh, 12px);
   min-width: 0;
-  padding: 48px 22px 22px;
+  padding: clamp(42px, 5vh, 48px) clamp(12px, 1.7vw, 22px) clamp(12px, 2vh, 22px);
   overflow: hidden;
 }
 
@@ -352,6 +353,14 @@ h2 {
   overflow: hidden;
 }
 
+.workspace.stage-build .workflow-spine,
+.workspace.stage-launch .workflow-spine {
+  grid-template-columns: repeat(5, max-content);
+  justify-content: start;
+  width: fit-content;
+  max-width: 100%;
+}
+
 .workflow-stage {
   position: relative;
   display: flex;
@@ -406,6 +415,12 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.workspace.stage-build .ready-strip,
+.workspace.stage-launch .ready-strip {
+  max-height: 32px;
+  overflow: hidden;
 }
 
 .ready-check {
@@ -630,13 +645,21 @@ h2 {
 .settings-grid {
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .design-grid {
   display: grid;
   grid-template-columns: minmax(560px, 1.45fr) minmax(360px, 0.55fr);
   gap: 16px;
+}
+
+.design-grid.needs-brief {
+  grid-template-columns: minmax(520px, 1.25fr) minmax(360px, 0.75fr);
+}
+
+.design-grid.has-preview {
+  grid-template-columns: minmax(620px, 1.7fr) minmax(320px, 0.5fr);
 }
 
 .canvas-pane,
@@ -651,6 +674,21 @@ h2 {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.88);
   box-shadow: 0 18px 60px rgba(21, 32, 31, 0.08);
+}
+
+.resizable-panel {
+  resize: both;
+  overflow: auto;
+  min-width: 230px;
+  min-height: 220px;
+  max-width: calc(100vw - 108px);
+  max-height: calc(100vh - 96px);
+}
+
+.resizable-panel::-webkit-resizer {
+  border: 9px solid transparent;
+  border-right-color: #9bb3aa;
+  border-bottom-color: #9bb3aa;
 }
 
 .canvas-pane,
@@ -692,7 +730,7 @@ h2 {
 
 .brief-input,
 .output-input {
-  resize: none;
+  resize: vertical;
   min-height: 118px;
   padding: 14px;
   line-height: 1.5;
@@ -1019,6 +1057,22 @@ h2 {
   gap: 16px;
 }
 
+.code-grid.needs-build {
+  grid-template-columns: minmax(280px, 0.75fr) minmax(460px, 1.25fr);
+}
+
+.code-grid.needs-build .preview-pane {
+  display: none;
+}
+
+.code-grid.has-runtime {
+  grid-template-columns: minmax(220px, 0.45fr) minmax(300px, 0.7fr) minmax(560px, 1.85fr);
+}
+
+.code-grid.has-files {
+  grid-template-columns: minmax(240px, 0.55fr) minmax(460px, 1.25fr) minmax(420px, 0.9fr);
+}
+
 .file-browser {
   gap: 12px;
 }
@@ -1209,7 +1263,7 @@ h2 {
 
 .settings-grid {
   display: grid;
-  grid-template-columns: minmax(520px, 1fr) 380px;
+  grid-template-columns: minmax(520px, 1fr) minmax(320px, 0.45fr);
   gap: 16px;
 }
 
@@ -1297,6 +1351,79 @@ label span,
 
 .token-note code {
   color: #ffb2a7;
+}
+
+@container (max-width: 1120px) {
+  .design-grid,
+  .code-grid,
+  .settings-grid,
+  .design-grid.needs-brief,
+  .design-grid.has-preview,
+  .code-grid.needs-build,
+  .code-grid.has-files,
+  .code-grid.has-runtime {
+    grid-template-columns: 1fr;
+  }
+
+  .code-grid.needs-build .preview-pane {
+    display: grid;
+    min-height: 320px;
+  }
+
+  .resizable-panel {
+    resize: vertical;
+    max-width: 100%;
+  }
+
+  .canvas-pane,
+  .preview-pane {
+    min-height: min(62vh, 620px);
+  }
+
+  .file-browser,
+  .editor-pane,
+  .output-pane,
+  .settings-side {
+    min-height: 280px;
+  }
+}
+
+@media (max-height: 820px) {
+  .workspace {
+    gap: 7px;
+    padding-top: 40px;
+  }
+
+  .topbar {
+    margin-bottom: 0;
+  }
+
+  .topbar .eyebrow,
+  .ready-strip {
+    display: none;
+  }
+
+  h1 {
+    font-size: 1.35rem;
+  }
+
+  .workflow-stage {
+    min-height: 34px;
+    padding-inline: 10px;
+  }
+
+  .pane-title {
+    margin-bottom: 9px;
+  }
+
+  .brief-input,
+  .output-input {
+    min-height: 86px;
+  }
+
+  .terminal-pane {
+    min-height: 112px;
+  }
 }
 
 @media (max-width: 1180px) {

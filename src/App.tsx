@@ -170,6 +170,7 @@ export function App() {
       }),
     [brief, designOutput, files, clarification, buildResult, busy],
   );
+  const activeStageId = workflowStages.find((stage) => stage.state === 'active')?.id ?? workflowStages.at(-1)?.id ?? 'brief';
 
   const readyChecks = useMemo(
     () =>
@@ -888,7 +889,7 @@ export function App() {
         aria-orientation="vertical"
       />
 
-      <main className="workspace">
+      <main className={`workspace view-${view} stage-${activeStageId}`}>
         <header className="topbar">
           <div>
             <p className="eyebrow">OpenDesign Vibe Studio</p>
@@ -1198,9 +1199,15 @@ function DesignView(props: {
   onRunOpenDesign: () => void;
   onGenerate: () => void;
 }) {
+  const designState = props.designOutput.trim()
+    ? props.proposalPreviewFile
+      ? 'has-preview'
+      : 'has-notes'
+    : 'needs-brief';
+
   return (
-    <div className="design-grid">
-      <section className="canvas-pane">
+    <div className={`design-grid ${designState}`}>
+      <section className="canvas-pane resizable-panel">
         <div className="pane-title">
           <div>
             <p className="eyebrow">Initial proposal</p>
@@ -1232,7 +1239,7 @@ function DesignView(props: {
         )}
       </section>
 
-      <section className="output-pane">
+      <section className="output-pane resizable-panel">
         <div className="pane-title">
           <div>
             <p className="eyebrow">Handoff</p>
@@ -1283,10 +1290,11 @@ function CodeView(props: {
 }) {
   const [composerOpen, setComposerOpen] = useState(!props.files.length);
   const buildLabel = props.files.length ? 'Rebuild app' : 'Build app';
+  const codeState = !props.files.length ? 'needs-build' : props.buildResult ? 'has-runtime' : 'has-files';
 
   return (
-    <div className="code-grid">
-      <section className="file-browser">
+    <div className={`code-grid ${codeState}`}>
+      <section className="file-browser resizable-panel">
         <div className="pane-title compact">
           <div>
             <p className="eyebrow">Files</p>
@@ -1335,7 +1343,7 @@ function CodeView(props: {
         </div>
       </section>
 
-      <section className="editor-pane">
+      <section className="editor-pane resizable-panel">
         <div className="pane-title compact">
           <div>
             <p className="eyebrow">Editor</p>
@@ -1346,7 +1354,7 @@ function CodeView(props: {
         <pre className="code-block">{props.selectedContent || 'Select a generated file.'}</pre>
       </section>
 
-      <section className={props.buildResult ? 'preview-pane has-build' : 'preview-pane'}>
+      <section className={props.buildResult ? 'preview-pane has-build resizable-panel' : 'preview-pane resizable-panel'}>
         <div className="pane-title compact">
           <div>
             <p className="eyebrow">Runtime</p>
@@ -1505,7 +1513,7 @@ function SettingsView(props: {
 }) {
   return (
     <div className="settings-grid">
-      <section className="settings-main">
+      <section className="settings-main resizable-panel">
         <div className="pane-title">
           <div>
             <p className="eyebrow">Lobe-style routing</p>
@@ -1577,7 +1585,7 @@ function SettingsView(props: {
         </div>
       </section>
 
-      <section className="settings-side">
+      <section className="settings-side resizable-panel">
         <label>
           <span>OpenDesign command</span>
           <textarea

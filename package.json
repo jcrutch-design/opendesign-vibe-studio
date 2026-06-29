@@ -12,12 +12,27 @@
   },
   "keywords": [
     "opendesign",
+    "vibe-coding",
+    "ai-code-generation",
+    "openai-compatible",
     "llm",
     "electron",
-    "windows"
+    "windows",
+    "local-first",
+    "desktop-app",
+    "react",
+    "typescript"
   ],
   "author": "",
   "license": "MIT",
+  "homepage": "https://github.com/jcrutch-design/opendesign-vibe-studio#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jcrutch-design/opendesign-vibe-studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jcrutch-design/opendesign-vibe-studio/issues"
+  },
   "dependencies": {
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",

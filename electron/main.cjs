@@ -449,10 +449,14 @@ async function writeProjectFiles(projectPath, files) {
 
 async function prepareGeneratedApp(projectPath, files, appName, options = {}) {
   const root = path.resolve(projectPath);
-  const normalized = Array.isArray(files)
-    ? files.map((file) => String(file.path || '').replace(/\\/g, '/').replace(/^\/+/, ''))
+  const currentFiles = Array.isArray(files)
+    ? files.map((file) => ({
+        path: String(file.path || '').replace(/\\/g, '/').replace(/^\/+/, ''),
+        content: String(file.content ?? ''),
+      }))
     : [];
-  const manifest = await readOrInferAppManifest(root, normalized, appName, options);
+  const normalized = currentFiles.map((file) => file.path);
+  const manifest = await readOrInferAppManifest(root, currentFiles, appName, options);
   const launchKind = manifest.launch?.kind || inferLaunchKind(manifest);
   const entryPath =
     launchKind === 'none' || launchKind === 'command'
@@ -511,6 +515,10 @@ async function prepareGeneratedApp(projectPath, files, appName, options = {}) {
     );
   }
 
+  if (launchKind === 'electron-window' || launchKind === 'browser') {
+    await ensureEntryAssets(root, entryPath);
+  }
+
   await fs.writeFile(
     path.join(root, 'opendesign-app.json'),
     JSON.stringify(
@@ -534,7 +542,19 @@ async function prepareGeneratedApp(projectPath, files, appName, options = {}) {
   );
 }
 
-async function readOrInferAppManifest(root, pathsFromCurrentWrite, appName, options = {}) {
+async function readOrInferAppManifest(root, filesFromCurrentWrite, appName, options = {}) {
+  const currentFiles = normalizeCurrentFiles(filesFromCurrentWrite);
+  const pathsFromCurrentWrite = currentFiles.map((file) => file.path);
+  const currentManifest = readManifestFromCurrentFiles(currentFiles, 'opendesign-app.json');
+  if (currentManifest) {
+    return normalizeManifest(currentManifest, root, pathsFromCurrentWrite, appName);
+  }
+
+  if (pathsFromCurrentWrite.length) {
+    const inferred = await inferAppManifest(root, pathsFromCurrentWrite, appName, options);
+    return normalizeManifest(inferred, root, pathsFromCurrentWrite, appName);
+  }
+
   const explicit = await readManifestFile(root, 'opendesign-app.json');
   if (explicit) {
     return normalizeManifest(explicit, root, pathsFromCurrentWrite, appName);
@@ -561,6 +581,33 @@ async function readOrInferAppManifest(root, pathsFromCurrentWrite, appName, opti
 
   const inferred = await inferAppManifest(root, pathsFromCurrentWrite, appName, options);
   return normalizeManifest(inferred, root, pathsFromCurrentWrite, appName);
+}
+
+function normalizeCurrentFiles(filesFromCurrentWrite) {
+  if (!Array.isArray(filesFromCurrentWrite)) {
+    return [];
+  }
+  return filesFromCurrentWrite.map((file) => {
+    if (typeof file === 'string') {
+      return { path: file.replace(/\\/g, '/').replace(/^\/+/, ''), content: '' };
+    }
+    return {
+      path: String(file.path || '').replace(/\\/g, '/').replace(/^\/+/, ''),
+      content: String(file.content ?? ''),
+    };
+  });
+}
+
+function readManifestFromCurrentFiles(files, fileName) {
+  const match = files.find((file) => file.path.toLowerCase() === fileName.toLowerCase());
+  if (!match?.content) {
+    return null;
+  }
+  try {
+    return JSON.parse(match.content);
+  } catch {
+    return null;
+  }
 }
 
 async function readManifestFile(root, fileName) {
@@ -649,13 +696,19 @@ function normalizeManifest(manifest, root, pathsFromCurrentWrite, appName) {
 }
 
 async function findOrInferHtmlEntry(root, pathsFromCurrentWrite) {
+  const writtenHtml = pathsFromCurrentWrite
+    .filter((filePath) => filePath.toLowerCase().endsWith('.html'))
+    .sort((left, right) => {
+      const leftIndex = left.toLowerCase().endsWith('index.html') ? 0 : 1;
+      const rightIndex = right.toLowerCase().endsWith('index.html') ? 0 : 1;
+      return leftIndex - rightIndex || left.localeCompare(right);
+    });
   const candidates = [
+    ...writtenHtml,
     'renderer/index.html',
     'app/index.html',
     'src/index.html',
     'index.html',
-    ...pathsFromCurrentWrite.filter((filePath) => filePath.endsWith('index.html')),
-    ...pathsFromCurrentWrite.filter((filePath) => filePath.endsWith('.html')),
   ];
 
   for (const candidate of [...new Set(candidates)]) {
@@ -665,6 +718,74 @@ async function findOrInferHtmlEntry(root, pathsFromCurrentWrite) {
   }
 
   throw new Error('No HTML entry was generated. Browser and Electron launches need renderer/index.html or another .html file.');
+}
+
+async function ensureEntryAssets(root, entryPath) {
+  if (!entryPath || !entryPath.toLowerCase().endsWith('.html')) {
+    return;
+  }
+  const entryFullPath = resolveInside(root, entryPath);
+  let html = '';
+  try {
+    html = await fs.readFile(entryFullPath, 'utf8');
+  } catch {
+    return;
+  }
+
+  const entryDir = path.dirname(entryFullPath);
+  const assetRefs = extractLocalHtmlAssetRefs(html);
+  for (const assetRef of assetRefs) {
+    const target = path.resolve(entryDir, assetRef);
+    if (!target.startsWith(root) || (await exists(target))) {
+      continue;
+    }
+    const source = await findFallbackAsset(root, assetRef);
+    if (!source || source === target) {
+      continue;
+    }
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(source, target);
+  }
+}
+
+function extractLocalHtmlAssetRefs(html) {
+  const refs = [];
+  const attributePattern = /\b(?:href|src)=["']([^"']+)["']/gi;
+  let match;
+  while ((match = attributePattern.exec(html)) !== null) {
+    const ref = match[1].trim();
+    if (!ref || isExternalAssetRef(ref) || ref.startsWith('#')) {
+      continue;
+    }
+    const cleanRef = ref.split(/[?#]/)[0];
+    if (cleanRef && !path.isAbsolute(cleanRef) && !cleanRef.startsWith('/')) {
+      refs.push(cleanRef);
+    }
+  }
+  return [...new Set(refs)];
+}
+
+function isExternalAssetRef(ref) {
+  return /^(?:[a-z]+:)?\/\//i.test(ref) || /^(?:data|blob|mailto):/i.test(ref);
+}
+
+async function findFallbackAsset(root, assetRef) {
+  const basename = path.basename(assetRef);
+  const candidates = [
+    assetRef,
+    basename,
+    basename.toLowerCase() === 'script.js' ? 'app.js' : '',
+    basename.toLowerCase() === 'app.js' ? 'script.js' : '',
+    path.join('renderer', basename),
+  ].filter(Boolean);
+
+  for (const candidate of [...new Set(candidates)]) {
+    const fullPath = path.resolve(root, candidate);
+    if (fullPath.startsWith(root) && (await exists(fullPath))) {
+      return fullPath;
+    }
+  }
+  return '';
 }
 
 function inferLaunchKind(manifest) {

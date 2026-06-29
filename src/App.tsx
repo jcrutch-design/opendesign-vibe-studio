@@ -194,9 +194,7 @@ export function App() {
     if (!activeProject) {
       return '';
     }
-    const index =
-      files.find((file) => file.path === 'renderer/index.html') ??
-      files.find((file) => file.path.endsWith('index.html'));
+    const index = getRuntimePreviewFile(files);
     return index ? `file:///${activeProject.path.replace(/\\/g, '/')}/${index.path}?v=${previewRevision}` : '';
   }, [activeProject, files, previewRevision]);
 
@@ -1795,9 +1793,7 @@ function getGeneratedOutputIssues(files: GeneratedFile[]) {
   const paths = new Set(files.map((file) => file.path.toLowerCase()));
   const issues: string[] = [];
   const manifest = readGeneratedManifest(files);
-  const htmlFile =
-    files.find((file) => file.path.toLowerCase() === 'renderer/index.html') ??
-    files.find((file) => file.path.toLowerCase().endsWith('index.html'));
+  const htmlFile = getRuntimePreviewFile(files);
   const cssFile =
     files.find((file) => file.path.toLowerCase() === 'renderer/styles.css') ??
     files.find((file) => file.path.toLowerCase().endsWith('styles.css'));
@@ -1847,8 +1843,12 @@ function getGeneratedOutputIssues(files: GeneratedFile[]) {
   if (htmlFile && cssFile && !/href=["'][^"']*styles\.css["']/i.test(htmlFile.content)) {
     issues.push('HTML entry must load the CSS file');
   }
-  if (htmlFile && jsFile && !/src=["'][^"']*app\.js["']/i.test(htmlFile.content)) {
+  if (htmlFile && jsFile && !/<script\b[^>]*\bsrc=["'][^"']+["']/i.test(htmlFile.content)) {
     issues.push('HTML entry must load the app JavaScript file');
+  }
+  const assetIssues = getHtmlAssetIssues(htmlFile, files);
+  if (assetIssues.length) {
+    issues.push(...assetIssues);
   }
   if (cssFile && cssFile.content.replace(/\s/g, '').length < 900) {
     issues.push('CSS is too thin; visual app output may look like unstyled browser HTML');
@@ -1881,6 +1881,85 @@ function readGeneratedManifest(files: GeneratedFile[]) {
   }
 }
 
+function getRuntimePreviewFile(files: GeneratedFile[]) {
+  const manifest = readGeneratedManifest(files);
+  const manifestEntry = manifest?.launch?.entry ?? manifest?.entry;
+  if (manifestEntry?.toLowerCase().endsWith('.html')) {
+    const match = files.find((file) => file.path.toLowerCase() === manifestEntry.toLowerCase());
+    if (match) {
+      return match;
+    }
+  }
+  return (
+    files.find((file) => file.path.toLowerCase() === 'renderer/index.html') ??
+    files.find((file) => file.path.toLowerCase().endsWith('index.html')) ??
+    files.find((file) => file.path.toLowerCase().endsWith('.html'))
+  );
+}
+
+function getHtmlAssetIssues(htmlFile: GeneratedFile | undefined, files: GeneratedFile[]) {
+  if (!htmlFile) {
+    return [];
+  }
+  const paths = new Set(files.map((file) => file.path.toLowerCase()));
+  const refs = extractLocalHtmlAssetRefs(htmlFile.content);
+  const issues: string[] = [];
+  for (const ref of refs) {
+    const resolved = resolveAssetPath(htmlFile.path, ref);
+    if (!resolved || paths.has(resolved.toLowerCase()) || hasFallbackAsset(paths, ref)) {
+      continue;
+    }
+    issues.push(`HTML entry references missing local asset: ${ref}`);
+  }
+  return issues;
+}
+
+function extractLocalHtmlAssetRefs(html: string) {
+  const refs: string[] = [];
+  const attributePattern = /\b(?:href|src)=["']([^"']+)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = attributePattern.exec(html)) !== null) {
+    const ref = match[1].trim();
+    if (!ref || ref.startsWith('#') || /^(?:[a-z]+:)?\/\//i.test(ref) || /^(?:data|blob|mailto):/i.test(ref)) {
+      continue;
+    }
+    const cleanRef = ref.split(/[?#]/)[0];
+    if (cleanRef && !cleanRef.startsWith('/')) {
+      refs.push(cleanRef);
+    }
+  }
+  return [...new Set(refs)];
+}
+
+function resolveAssetPath(htmlPath: string, ref: string) {
+  const baseParts = htmlPath.split('/').slice(0, -1);
+  const parts = [...baseParts, ...ref.split('/')];
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (!part || part === '.') {
+      continue;
+    }
+    if (part === '..') {
+      resolved.pop();
+      continue;
+    }
+    resolved.push(part);
+  }
+  return resolved.join('/');
+}
+
+function hasFallbackAsset(paths: Set<string>, ref: string) {
+  const basename = ref.split('/').pop()?.toLowerCase() ?? '';
+  if (!basename) {
+    return false;
+  }
+  return (
+    paths.has(basename) ||
+    (basename === 'script.js' && paths.has('app.js')) ||
+    (basename === 'app.js' && paths.has('script.js'))
+  );
+}
+
 function makeBuildResult(
   project: StudioProject,
   written: GeneratedFile[],
@@ -1888,9 +1967,7 @@ function makeBuildResult(
   providerName?: string,
 ): BuildResult {
   const manifest = readGeneratedManifest(written);
-  const indexFile =
-    written.find((file) => file.path === 'renderer/index.html') ??
-    written.find((file) => file.path.endsWith('index.html'));
+  const indexFile = getRuntimePreviewFile(written);
   const launchEntry = manifest?.launch?.entry ?? manifest?.entry ?? indexFile?.path;
   const launchEntryPath = launchEntry ? toDiskPath(project.path, launchEntry) : undefined;
   const previewPath = indexFile ? toDiskPath(project.path, indexFile.path) : undefined;
